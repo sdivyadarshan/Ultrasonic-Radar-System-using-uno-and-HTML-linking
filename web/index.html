@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#04110b">
+  <title>Ultrasonic Radar | Arduino Uno</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #030906;
+      --panel: #08150e;
+      --green: #55ff8a;
+      --muted: #8db99b;
+      --red: #ff4c5c;
+      --line: rgba(85, 255, 138, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; padding: 24px;
+      background: radial-gradient(ellipse at 50% 40%, #0b2415 0%, var(--bg) 65%);
+      color: #e4ffe9; font-family: Inter, ui-sans-serif, system-ui, Arial, sans-serif;
+    }
+    .shell { max-width: 1120px; margin: auto; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:18px; }
+    .eyebrow { color:var(--green); letter-spacing:.2em; text-transform:uppercase; font-size:.72rem; }
+    h1 { margin:5px 0 0; font-size:clamp(1.45rem,3vw,2.2rem); letter-spacing:.04em; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button {
+      border:1px solid var(--green); border-radius:8px; padding:11px 16px;
+      background:#0d2818; color:var(--green); font-weight:700; cursor:pointer;
+    }
+    button:hover { background:#153b23; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .statusbar { display:flex; align-items:center; gap:10px; color:var(--muted); margin:12px 0; font-size:.9rem; }
+    .led { width:9px; height:9px; border-radius:50%; background:#68756b; box-shadow:0 0 10px currentColor; }
+    .led.connected { background:var(--green); color:var(--green); }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:16px; }
+    .panel { border:1px solid var(--line); border-radius:14px; background:rgba(5,18,10,.88); box-shadow:0 0 30px rgba(34,255,104,.05); }
+    .radar-panel { padding:12px; min-width:0; }
+    canvas { width:100%; height:auto; display:block; }
+    .metrics { padding:18px; display:flex; flex-direction:column; gap:16px; }
+    .metric-label { color:var(--muted); text-transform:uppercase; letter-spacing:.13em; font-size:.7rem; }
+    .metric-value { color:var(--green); font-size:2rem; font-weight:700; font-variant-numeric:tabular-nums; margin-top:4px; }
+    .state { border-top:1px solid var(--line); padding-top:15px; }
+    .state-value { margin-top:6px; font-weight:700; color:var(--green); }
+    .state-value.alert { color:var(--red); }
+    .hint { color:var(--muted); font-size:.82rem; line-height:1.5; }
+    footer { color:#72947b; font-size:.78rem; text-align:center; margin:18px 0 0; }
+    @media (max-width:760px) { body { padding:14px; } .layout { grid-template-columns:1fr; } .metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } .state,.hint { grid-column:1/-1; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">Live sensor visualization</div>
+        <h1>ULTRASONIC RADAR SYSTEM</h1>
+      </div>
+      <div class="actions">
+        <button id="connectBtn">Connect Arduino</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+      </div>
+    </header>
+
+    <div class="statusbar">
+      <span id="connectionLed" class="led"></span>
+      <span id="connectionText">Disconnected — connect your Arduino Uno over USB</span>
+    </div>
+
+    <section class="layout">
+      <div class="panel radar-panel">
+        <canvas id="radar" width="900" height="540" aria-label="Live radar display"></canvas>
+      </div>
+      <aside class="panel metrics">
+        <div>
+          <div class="metric-label">Scan angle</div>
+          <div class="metric-value"><span id="angleValue">—</span><small>°</small></div>
+        </div>
+        <div>
+          <div class="metric-label">Measured distance</div>
+          <div class="metric-value"><span id="distanceValue">—</span><small> cm</small></div>
+        </div>
+        <div class="state">
+          <div class="metric-label">Detection status</div>
+          <div id="objectStatus" class="state-value">Waiting for data</div>
+        </div>
+        <div class="state">
+          <div class="metric-label">Alert level</div>
+          <div id="alertStatus" class="state-value">No alert</div>
+        </div>
+        <p class="hint">The radar uses ultrasonic distance readings from the HC-SR04. It is a radar-style display, not RF radar.</p>
+      </aside>
+    </section>
+    <footer>Arduino Uno · HC-SR04 · SG90 Servo · HTML5 Canvas · Web Serial API</footer>
+  </main>
+
+  <script>
+    const canvas = document.getElementById('radar');
+    const ctx = canvas.getContext('2d');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+
+    let port = null;
+    let reader = null;
+    let keepReading = false;
+    let angle = 90;
+    let distance = 400;
+    let hasReading = false;
+    let targets = [];
+
+    const cx = canvas.width / 2;
+    const cy = canvas.height - 28;
+    const maxRadius = 455;
+    const maxRangeCm = 100;
+    const green = '#55ff8a';
+
+    function setConnection(connected, message) {
+      document.getElementById('connectionLed').classList.toggle('connected', connected);
+      document.getElementById('connectionText').textContent = message;
+      connectBtn.disabled = connected;
+      disconnectBtn.disabled = !connected;
+    }
+
+    function updateReadout() {
+      document.getElementById('angleValue').textContent = hasReading ? angle : '—';
+      document.getElementById('distanceValue').textContent =
+        hasReading && distance < 400 ? distance : (hasReading ? 'Out of range' : '—');
+
+      const detected = hasReading && distance < 100;
+      const close = hasReading && distance < 20;
+      const status = document.getElementById('objectStatus');
+      status.textContent = !hasReading ? 'Waiting for data' : (detected ? 'Object detected' : 'No object in range');
+      status.classList.toggle('alert', close);
+
+      const alert = document.getElementById('alertStatus');
+      if (!hasReading || distance > 50) alert.textContent = 'No alert';
+      else if (distance > 20) alert.textContent = 'Slow beeps';
+      else if (distance > 10) alert.textContent = 'Rapid warning';
+      else alert.textContent = 'Continuous warning';
+      alert.classList.toggle('alert', close);
+    }
+
+    function acceptLine(line) {
+      const match = line.trim().match(/^(\d{1,3})\s*,\s*(\d{1,3})$/);
+      if (!match) return;
+
+      const nextAngle = Number(match[1]);
+      const nextDistance = Number(match[2]);
+      if (nextAngle < 0 || nextAngle > 180 || nextDistance < 0 || nextDistance > 400) return;
+
+      angle = nextAngle;
+      distance = nextDistance;
+      hasReading = true;
+
+      if (distance < maxRangeCm) {
+        const radians = (180 - angle) * Math.PI / 180;
+        const radius = distance / maxRangeCm * maxRadius;
+        targets.push({
+          x: cx + radius * Math.cos(radians),
+          y: cy - radius * Math.sin(radians),
+          time: performance.now()
+        });
+        if (targets.length > 250) targets.shift();
+      }
+      updateReadout();
+    }
+
+    async function connectArduino() {
+      if (!('serial' in navigator)) {
+        alert('Web Serial is not available. Open this page in an up-to-date Chrome or Edge browser on localhost or HTTPS.');
+        return;
+      }
+
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+        keepReading = true;
+        setConnection(true, 'Connected — receiving live serial data');
+        readSerial();
+      } catch (error) {
+        setConnection(false, 'Connection failed: ' + error.message);
+        console.error(error);
+      }
+    }
+
+    async function readSerial() {
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        reader = port.readable.getReader();
+        while (keepReading) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || '';
+          for (const line of lines) acceptLine(line);
+          if (buffer.length > 80) buffer = '';
+        }
+      } catch (error) {
+        if (keepReading) {
+          console.error(error);
+          setConnection(false, 'Serial read error: ' + error.message);
+        }
+      } finally {
+        if (reader) {
+          try { reader.releaseLock(); } catch (_) {}
+          reader = null;
+        }
+      }
+    }
+
+    async function disconnectArduino() {
+      keepReading = false;
+      if (reader) {
+        try { await reader.cancel(); } catch (_) {}
+      }
+      if (port) {
+        try { await port.close(); } catch (_) {}
+      }
+      port = null;
+      setConnection(false, 'Disconnected');
+    }
+
+    connectBtn.addEventListener('click', connectArduino);
+    disconnectBtn.addEventListener('click', disconnectArduino);
+
+    function drawRadar() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#030906';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(85,255,138,.42)';
+      ctx.lineWidth = 1.5;
+      for (let cm = 20; cm <= maxRangeCm; cm += 20) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, cm / maxRangeCm * maxRadius, Math.PI, 2 * Math.PI);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(160,255,190,.8)';
+        ctx.font = '12px monospace';
+        ctx.fillText(cm + ' cm', cx + 7, cy - cm / maxRangeCm * maxRadius + 15);
+      }
+
+      for (const deg of [0, 30, 60, 90, 120, 150, 180]) {
+        const radians = (180 - deg) * Math.PI / 180;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + maxRadius * Math.cos(radians), cy - maxRadius * Math.sin(radians));
+        ctx.strokeStyle = deg === 90 ? 'rgba(85,255,138,.55)' : 'rgba(85,255,138,.23)';
+        ctx.stroke();
+        const labelRadius = maxRadius + 18;
+        ctx.fillStyle = green;
+        ctx.font = '13px monospace';
+        ctx.fillText(deg + '°', cx + labelRadius * Math.cos(radians) - 12, cy - labelRadius * Math.sin(radians));
+      }
+      ctx.restore();
+
+      const now = performance.now();
+      targets = targets.filter(target => now - target.time < 2500);
+      for (const target of targets) {
+        const age = (now - target.time) / 2500;
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(255,76,92,' + (1 - age) + ')';
+        ctx.shadowColor = '#ff4c5c';
+        ctx.shadowBlur = 12;
+        ctx.arc(target.x, target.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+
+      const radians = (180 - angle) * Math.PI / 180;
+      const sweepX = cx + maxRadius * Math.cos(radians);
+      const sweepY = cy - maxRadius * Math.sin(radians);
+      const gradient = ctx.createLinearGradient(cx, cy, sweepX, sweepY);
+      gradient.addColorStop(0, 'rgba(85,255,138,.95)');
+      gradient.addColorStop(1, 'rgba(85,255,138,.15)');
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 4;
+      ctx.shadowColor = green;
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(sweepX, sweepY);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = green;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fill();
+
+      requestAnimationFrame(drawRadar);
+    }
+
+    updateReadout();
+    drawRadar();
+  </script>
+</body>
+</html>
