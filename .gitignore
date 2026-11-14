@@ -1,0 +1,20 @@
+# Arduino build artifacts
+*.hex
+*.elf
+*.eep
+*.map
+*.d
+build/
+.cache/
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local logs and temporary captures
+*.log
+*.tmp
